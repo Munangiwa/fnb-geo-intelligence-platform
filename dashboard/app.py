@@ -49,11 +49,22 @@ def query(_engine, sql: str) -> pd.DataFrame:
 
 def trigger_refresh():
     """Runs the pipeline live — the 'latest data' demo moment."""
-    project_root = os.path.join(os.path.dirname(__file__), "..")
-    result = subprocess.run(
-        [sys.executable, "run_pipeline.py"],
-        capture_output=True, text=True, cwd=project_root
-    )
+    # project_root = os.path.join(os.path.dirname(__file__), "..")
+    # result = subprocess.run(
+    #     [sys.executable, "run_pipeline.py"],
+    #     capture_output=True, text=True, cwd=project_root
+    # )
+    try:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        script_path = os.path.join(project_root, "run_pipeline.py")
+
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            timeout=300  # prevent hanging
+        )
     return result.returncode == 0, result.stdout + result.stderr
 
 
