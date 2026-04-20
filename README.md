@@ -10,6 +10,7 @@ Built for the FNB Data Engineer II technical assessment.
 ```bash
 py -m pip install -r requirements.txt
 cp .env.example .env
+py del geo_data.db
 py run_pipeline.py
 py -m streamlit run dashboard/app.py
 ```
