@@ -8,10 +8,10 @@ Built for the FNB Data Engineer II technical assessment.
 ## Quickstart (3 commands)
 
 ```bash
-pip install -r requirements.txt
+py -m pip install -r requirements.txt
 cp .env.example .env
-python run_pipeline.py
-streamlit run dashboard/app.py
+py run_pipeline.py
+py -m streamlit run dashboard/app.py
 ```
 
 Dashboard opens at **http://localhost:8501**
