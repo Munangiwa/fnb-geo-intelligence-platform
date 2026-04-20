@@ -65,7 +65,9 @@ def trigger_refresh():
             cwd=project_root,
             timeout=300  # prevent hanging
         )
-    return result.returncode == 0, result.stdout + result.stderr
+        return result.returncode == 0, result.stdout + result.stderr
+    except Exception as e:
+        return False, str(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
