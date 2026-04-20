@@ -5,12 +5,6 @@ LAYER   : EDW Load
 PURPOSE : Load transformed DataFrames into the SQLite star schema.
           Uses full refresh strategy (DELETE + INSERT) wrapped in transactions.
           Production equivalent: Teradata MERGE / UPSERT for delta loads.
-
-STRATEGY: Full refresh is used because:
-  - OurAirports updates nightly (~12MB — fast to reload)
-  - GeoNames cities15000 updates daily (~4MB)
-  - Full refresh guarantees consistency and is easy to audit
-  - Delta load can be layered on once baseline is stable
 """
 
 import pandas as pd
@@ -24,17 +18,20 @@ RUN_DATE = str(datetime.now().date())
 
 def _log_run(engine, task: str, status: str, loaded=0, quarantined=0, duration=0.0, error=None):
     """Writes an entry to the pipeline audit log."""
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO pipeline_run_log
-                (task_name, status, records_loaded, records_quarantined,
-                 duration_seconds, error_message)
-            VALUES (:task, :status, :loaded, :quar, :dur, :err)
-        """), {
-            "task"  : task,   "status": status,
-            "loaded": loaded, "quar"  : quarantined,
-            "dur"   : duration, "err" : str(error) if error else None
-        })
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO pipeline_run_log
+                    (task_name, status, records_loaded, records_quarantined,
+                     duration_seconds, error_message)
+                VALUES (:task, :status, :loaded, :quar, :dur, :err)
+            """), {
+                "task"  : task,   "status": status,
+                "loaded": loaded, "quar"  : quarantined,
+                "dur"   : duration, "err" : str(error) if error else None
+            })
+    except Exception:
+        pass  # Never let audit logging break the pipeline
 
 
 def load_dim_continents(engine):
@@ -77,10 +74,23 @@ def load_dim_country(engine, country_df: pd.DataFrame):
             conn.execute(text("DELETE FROM dim_country"))
 
         df = country_df.copy()
+
+        # Rename continent to continent_code if needed
         if "continent" in df.columns and "continent_code" not in df.columns:
             df = df.rename(columns={"continent": "continent_code"})
 
         df["load_date"] = RUN_DATE
+
+        # ── Data cleaning before load ──────────────────────────────────────────
+        # Drop rows with null country_code — these violate the NOT NULL constraint
+        before = len(df)
+        df = df[df["country_code"].notna() & (df["country_code"].str.strip() != "")]
+        dropped = before - len(df)
+        if dropped > 0:
+            logger.warning(f"dim_country: dropped {dropped} rows with null/empty country_code")
+
+        # Replace any remaining NaN values with None so SQLite handles them as NULL
+        df = df.where(pd.notna(df), None)
 
         cols = ["country_code", "iso3", "country_name", "capital",
                 "continent_code", "continent_name", "population", "area_sq_km", "load_date"]
@@ -100,13 +110,10 @@ def load_dim_country(engine, country_df: pd.DataFrame):
 
 
 def load_fact_airport(engine, airports_df: pd.DataFrame, country_ref_df: pd.DataFrame):
-    """
-    Loads the airport fact table.
-    Enriches airports with continent info by joining to the country reference.
-    """
+    """Loads the airport fact table, enriched with continent info."""
     start = datetime.now()
     try:
-        # Enrich with continent
+        # Enrich with continent from country reference
         df = airports_df.merge(
             country_ref_df[["country_code", "country_name", "continent_code", "continent_name"]],
             on="country_code", how="left"
@@ -116,9 +123,12 @@ def load_fact_airport(engine, airports_df: pd.DataFrame, country_ref_df: pd.Data
             conn.execute(text("DELETE FROM fact_airport"))
 
         df = df.rename(columns={
-            "name"              : "airport_name",
-            "type"              : "facility_type_raw",
+            "name" : "airport_name",
+            "type" : "facility_type_raw",
         })
+
+        # Clean nulls
+        df = df.where(pd.notna(df), None)
 
         cols = [
             "airport_id", "icao_code", "iata_code",
@@ -159,6 +169,9 @@ def load_fact_city(engine, cities_df: pd.DataFrame):
         if "continent" in df.columns and "continent_code" not in df.columns:
             df = df.rename(columns={"continent": "continent_code"})
 
+        # Clean nulls
+        df = df.where(pd.notna(df), None)
+
         cols = [
             "geonameid", "city_name", "city_name_ascii",
             "latitude", "longitude",
@@ -189,14 +202,17 @@ def load_quarantine(engine, df: pd.DataFrame, table: str):
     if df is None or len(df) == 0:
         return
     try:
+        df = df.copy()
         df["quarantine_date"] = RUN_DATE
-        cols = {
+        df = df.where(pd.notna(df), None)
+
+        col_map = {
             "quarantine_airport": ["airport_id", "airport_name", "facility_type_raw",
                                    "country_code", "quarantine_reason", "quarantine_date"],
             "quarantine_city":    ["geonameid", "city_name", "country_code",
                                    "quarantine_reason", "quarantine_date"],
         }
-        save_cols = [c for c in cols.get(table, []) if c in df.columns]
+        save_cols = [c for c in col_map.get(table, []) if c in df.columns]
         if save_cols:
             df[save_cols].to_sql(table, engine, if_exists="append", index=False)
             logger.warning(f"{table}: {len(df):,} quarantined records saved")
