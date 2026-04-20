@@ -32,23 +32,43 @@ logger.add("logs/pipeline_{time:YYYYMMDD}.log", rotation="1 day", retention="30 
 
 
 def init_schema(engine):
-    """Creates all tables from the SQL DDL file. Safe to re-run (IF NOT EXISTS)."""
+    """
+    Creates all tables and indexes from the SQL DDL file.
+    Each statement runs in its own transaction so a failing INDEX
+    (e.g. table not yet visible) never blocks the TABLE creation.
+    Safe to re-run — all statements use IF NOT EXISTS.
+    """
     from sqlalchemy import text
     schema_path = os.path.join(os.path.dirname(__file__), "sql", "schema", "create_schema.sql")
     with open(schema_path, "r") as f:
         schema_sql = f.read()
 
+    # Strip comments and blank lines, split on semicolons
     statements = [
         s.strip() for s in schema_sql.split(";")
         if s.strip() and not s.strip().startswith("--")
     ]
-    with engine.begin() as conn:
-        for stmt in statements:
+
+    # Pass 1: CREATE TABLE statements first
+    for stmt in statements:
+        if stmt.upper().startswith("CREATE TABLE"):
             try:
-                conn.execute(text(stmt))
+                with engine.begin() as conn:
+                    conn.execute(text(stmt))
             except Exception as e:
                 if "already exists" not in str(e).lower():
-                    logger.warning(f"Schema stmt warning: {e}")
+                    logger.warning(f"Table creation warning: {e}")
+
+    # Pass 2: CREATE INDEX statements after all tables exist
+    for stmt in statements:
+        if stmt.upper().startswith("CREATE INDEX"):
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(stmt))
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    logger.warning(f"Index creation warning: {e}")
+
     logger.success("Schema initialised")
 
 
