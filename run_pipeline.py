@@ -10,13 +10,14 @@ In production this is triggered by Apache Airflow (Control-M equivalent).
 Locally it runs as a single Python script.
 
 Usage:
-    python run_pipeline.py          # Full run
-    python run_pipeline.py --dq-only   # Re-run DQ checks only
+    python run_pipeline.py            # Full run
+    python run_pipeline.py --dq-only  # Re-run DQ checks only
 """
 
 import sys
 import os
 import time
+import sqlite3
 import argparse
 from datetime import datetime
 from loguru import logger
@@ -33,63 +34,49 @@ logger.add("logs/pipeline_{time:YYYYMMDD}.log", rotation="1 day", retention="30 
 
 def init_schema(engine):
     """
-    Creates all tables and indexes from the SQL DDL file.
-    Each statement runs in its own transaction so a failing INDEX
-    (e.g. table not yet visible) never blocks the TABLE creation.
-    Safe to re-run — all statements use IF NOT EXISTS.
+    Creates all tables and indexes using SQLite's native executescript.
+    This is the most reliable way to run multi-statement DDL in SQLite —
+    executescript runs every statement in order in a single connection,
+    guaranteeing tables exist before their indexes are created.
     """
-    from sqlalchemy import text
     schema_path = os.path.join(os.path.dirname(__file__), "sql", "schema", "create_schema.sql")
     with open(schema_path, "r") as f:
         schema_sql = f.read()
 
-    # Strip comments and blank lines, split on semicolons
-    statements = [
-        s.strip() for s in schema_sql.split(";")
-        if s.strip() and not s.strip().startswith("--")
-    ]
+    # Get the raw file path from the SQLAlchemy engine URL
+    db_path = str(engine.url).replace("sqlite:///", "")
+    db_path = os.path.abspath(db_path)
 
-    # Pass 1: CREATE TABLE statements first
-    for stmt in statements:
-        if stmt.upper().startswith("CREATE TABLE"):
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text(stmt))
-            except Exception as e:
-                if "already exists" not in str(e).lower():
-                    logger.warning(f"Table creation warning: {e}")
-
-    # Pass 2: CREATE INDEX statements after all tables exist
-    for stmt in statements:
-        if stmt.upper().startswith("CREATE INDEX"):
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text(stmt))
-            except Exception as e:
-                if "already exists" not in str(e).lower():
-                    logger.warning(f"Index creation warning: {e}")
-
-    logger.success("Schema initialised")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(schema_sql)
+        conn.commit()
+        logger.success(f"Schema initialised → {db_path}")
+    except Exception as e:
+        logger.error(f"Schema init failed: {e}")
+        raise
+    finally:
+        conn.close()
 
 
 def refresh_views(engine):
-    """Drops and recreates all business question views."""
-    from sqlalchemy import text
+    """Drops and recreates all business question views using executescript."""
     views_path = os.path.join(os.path.dirname(__file__), "sql", "views", "business_views.sql")
     with open(views_path, "r") as f:
         views_sql = f.read()
 
-    statements = [
-        s.strip() for s in views_sql.split(";")
-        if s.strip() and not s.strip().startswith("--")
-    ]
-    with engine.begin() as conn:
-        for stmt in statements:
-            try:
-                conn.execute(text(stmt))
-            except Exception as e:
-                logger.warning(f"View warning: {e}")
-    logger.success("Business views refreshed")
+    db_path = str(engine.url).replace("sqlite:///", "")
+    db_path = os.path.abspath(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(views_sql)
+        conn.commit()
+        logger.success("Business views refreshed")
+    except Exception as e:
+        logger.warning(f"View refresh warning: {e}")
+    finally:
+        conn.close()
 
 
 def run_full_pipeline():
@@ -118,10 +105,10 @@ def run_full_pipeline():
     from pipeline.extract.extract_airports import extract_airports, extract_countries
     from pipeline.extract.extract_cities   import extract_cities, extract_country_info
 
-    raw_airports    = extract_airports()
+    raw_airports     = extract_airports()
     raw_oa_countries = extract_countries()
-    raw_cities      = extract_cities()
-    raw_countryinfo = extract_country_info()
+    raw_cities       = extract_cities()
+    raw_countryinfo  = extract_country_info()
 
     logger.success(
         f"Extract done in {time.time()-t:.1f}s | "
@@ -137,9 +124,9 @@ def run_full_pipeline():
     from pipeline.transform.transform_airports import transform_airports, transform_countries
     from pipeline.transform.transform_cities   import transform_cities, transform_country_info
 
-    clean_airports,  quar_airports  = transform_airports(raw_airports)
+    clean_airports,    quar_airports = transform_airports(raw_airports)
     clean_oa_countries               = transform_countries(raw_oa_countries)
-    clean_cities,    quar_cities    = transform_cities(raw_cities, raw_countryinfo)
+    clean_cities,      quar_cities   = transform_cities(raw_cities, raw_countryinfo)
     clean_country_info               = transform_country_info(raw_countryinfo)
 
     logger.success(
@@ -179,16 +166,16 @@ def run_full_pipeline():
     refresh_views(engine)
 
     # ── Done ───────────────────────────────────────────────────────────────────
-    total      = time.time() - pipeline_start
-    failures   = [r for r in dq_results if r["status"] == "FAIL"]
+    total    = time.time() - pipeline_start
+    failures = [r for r in dq_results if r["status"] == "FAIL"]
 
     logger.info("=" * 65)
     logger.success(f"  PIPELINE COMPLETE in {total:.1f}s")
-    logger.info(f"  Airports loaded   : {len(clean_airports):,}")
-    logger.info(f"  Cities loaded     : {len(clean_cities):,}")
-    logger.info(f"  Countries loaded  : {len(clean_country_info):,}")
-    logger.info(f"  DQ passed         : {len(dq_results)-len(failures)}/{len(dq_results)}")
-    logger.info(f"  Database file     : geo_data.db")
+    logger.info(f"  Airports loaded  : {len(clean_airports):,}")
+    logger.info(f"  Cities loaded    : {len(clean_cities):,}")
+    logger.info(f"  Countries loaded : {len(clean_country_info):,}")
+    logger.info(f"  DQ passed        : {len(dq_results)-len(failures)}/{len(dq_results)}")
+    logger.info(f"  Database file    : geo_data.db")
     if failures:
         logger.error(f"  DQ FAILURES: {[r['check'] for r in failures]}")
     logger.info("=" * 65)
