@@ -23,16 +23,16 @@ from datetime import datetime
 from loguru import logger
 
 # ── Logger ─────────────────────────────────────────────────────────────────────
-# logger.remove()
-# logger.add(sys.stdout,
-#            format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | {message}",
-#            colorize=True)
 logger.remove()
+logger.add(sys.stdout,
+           format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | {message}",
+           colorize=True)
+# logger.remove()
 
-logger.add(
-    sys.stdout.buffer,
-    format="{time:HH:mm:ss} | {level: <8} | {message}",
-    colorize=False)
+# logger.add(
+#     sys.stdout.buffer,
+#     format="{time:HH:mm:ss} | {level: <8} | {message}",
+#     colorize=False)
 
 os.makedirs("logs", exist_ok=True)
 logger.add("logs/pipeline_{time:YYYYMMDD}.log", rotation="1 day", retention="30 days")
